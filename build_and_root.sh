@@ -66,6 +66,14 @@ if [[ "$VARIANT" == "user" ]]; then
     warn "but debugging via 'adb root' / 'adb shell su' won't — use the KernelSU Manager app's root prompt instead."
 fi
 
+# AOSP's build/envsetup.sh and its helper functions (lunch, m, etc.) are not
+# written to be "set -u" safe — they reference variables like $TOP before
+# assignment in places, which trips `nounset` and kills this script with
+# "unbound variable" even though envsetup.sh itself is working fine. Disable
+# nounset for the build portion; our own argument validation already ran
+# above under strict mode, so this is safe.
+set +u
+
 # shellcheck disable=SC1091
 source build/envsetup.sh
 
@@ -73,6 +81,8 @@ export SKIP_KERNEL_BUILD=true
 
 lunch "lunaris_${DEVICE}-${VARIANT}"
 m bacon -j"$(nproc --all)"
+
+set -u
 
 ok "Build finished."
 
