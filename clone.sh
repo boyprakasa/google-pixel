@@ -7,10 +7,13 @@
 # This is a modified/finalized fork produced during a Lunaris AOSP (Pixel 8
 # "shiba") bring-up session: added a community kernel-modules mirror option,
 # a GCam (Tensor) source option, full (non-shallow) cloning for kernel
-# module repos, corrected shiba/husky default component paths, and
-# Tensor-device post-clone build reminders. All core logic, menu flow, and
-# design (source_repo/add_component/configure_pixel/execute, etc.) is
-# Bias8145's original work — credit to Bias8145 for the base script.
+# module repos, corrected shiba/husky default component paths,
+# Tensor-device post-clone build reminders, and an optional step to drop a
+# prebuilt KernelSU-Next kernel module (heDuke/KernelSU "HuskySU") into the
+# kernel-modules path so the build is pre-rooted without a separate
+# post-build boot-patch script. All core logic, menu flow, and design
+# (source_repo/add_component/configure_pixel/execute, etc.) is Bias8145's
+# original work — credit to Bias8145 for the base script.
 set +u
 set -Eo pipefail
 
@@ -363,6 +366,60 @@ configure_pixel(){
     done
 }
 
+# NEW: offer to drop a prebuilt KernelSU-Next kernel module (.ko) into the
+# kernel-modules path and register it in vendor_dlkm.modules.load, so the
+# Android build packages + loads it automatically — no separate post-build
+# boot-patch step (like ksud) needed. Source: heDuke/KernelSU "HuskySU"
+# builds, which ship KMI-named assets (e.g. android14-6.1_kernelsu.ko)
+# confirmed for husky (Pixel 8 Pro); shiba shares the same shusky kernel
+# base so the same asset is very likely compatible, but this is UNCONFIRMED
+# for shiba specifically — test and report back if it doesn't boot.
+offer_kernelsu_module(){
+    local device="$1" kernel_path="" kmi="" asset_name="" api_json dl_url modules_load
+    case "$device" in
+        shiba|husky) kernel_path="device/google/shusky-kernels/6.1"; kmi="android14-6.1";;
+        akita)       kernel_path="device/google/akita-kernels/6.1";  kmi="android14-6.1";;
+        *) return 0;;
+    esac
+    [[ -d "$kernel_path" ]] || { echo -e "${C_YELLOW}[WARN] ${kernel_path} not present — skipping KernelSU-Next module offer.${C_RESET}"; return 0; }
+
+    menu "Add a prebuilt KernelSU-Next module (pre-root) to ${kernel_path}?" \
+        "heDuke/KernelSU 'HuskySU' — ${kmi}_kernelsu.ko (confirmed husky; shiba likely, unconfirmed; akita unconfirmed)" \
+        "Skip — handle root separately (e.g. a post-build boot-patch script)"
+    case "$MENU_CHOICE" in
+        0) asset_name="${kmi}_kernelsu.ko";;
+        *) return 0;;
+    esac
+
+    echo -e "${C_CYAN}Fetching latest release info from heDuke/KernelSU ...${C_RESET}"
+    api_json="$(curl -fsSL "https://api.github.com/repos/heDuke/KernelSU/releases/latest" 2>/dev/null)" || {
+        echo -e "${C_RED}[ERROR] Could not reach GitHub API — check manually: https://github.com/heDuke/KernelSU/releases${C_RESET}"
+        return 1
+    }
+    dl_url="$(echo "$api_json" | grep -o "\"browser_download_url\": *\"[^\"]*${asset_name}\"" | head -1 | sed -E 's/.*"(https:[^"]+)"/\1/')"
+    if [[ -z "$dl_url" ]]; then
+        echo -e "${C_RED}[ERROR] No asset matching ${asset_name} in the latest release.${C_RESET}"
+        echo "Check manually: https://github.com/heDuke/KernelSU/releases"
+        return 1
+    fi
+
+    echo -e "${C_BLUE}[DOWNLOAD]${C_RESET} $dl_url -> ${kernel_path}/kernelsu.ko"
+    if ((DRY_RUN)); then echo "       curl -fL -o '${kernel_path}/kernelsu.ko' '$dl_url'"; return 0; fi
+    curl -fL -o "${kernel_path}/kernelsu.ko" "$dl_url" || { echo -e "${C_RED}[ERROR] Download failed.${C_RESET}"; return 1; }
+
+    modules_load="${kernel_path}/vendor_dlkm.modules.load"
+    if [[ -f "$modules_load" ]]; then
+        grep -qx "kernelsu.ko" "$modules_load" || echo "kernelsu.ko" >> "$modules_load"
+        echo -e "${C_GREEN}[OK]${C_RESET} Registered kernelsu.ko in $(basename "$modules_load")"
+    else
+        echo -e "${C_YELLOW}[WARN] ${modules_load} not found — add 'kernelsu.ko' to the correct modules.load file manually so the build actually loads it.${C_RESET}"
+    fi
+
+    echo -e "${C_GREEN}[OK]${C_RESET} KernelSU-Next module placed at ${kernel_path}/kernelsu.ko"
+    echo "No separate boot-patch script needed after this — rebuild with 'm bacon',"
+    echo "then install the KernelSU-Next Manager APK after first boot to manage root."
+}
+
 execute(){
     local p rc failed=0
     show_config
@@ -377,6 +434,7 @@ execute(){
         echo -e "${C_GREEN}[SUCCESS] Clone process completed.${C_RESET}"
         case "$DEVICE" in
             shiba|husky|akita)
+                ((DRY_RUN)) || offer_kernelsu_module "$DEVICE"
                 echo -e "\n${C_BOLD}${C_YELLOW}========== REMINDERS (Tensor devices) ==========${C_RESET}"
                 echo "1) Kernel is PREBUILT (modules only) — do not let 'lunch' try to"
                 echo "   sync/compile kernel source. Before lunch/build, run:"
